@@ -9,7 +9,12 @@
 import streamlit as st
 import pandas as pd
 import math
+import urllib.parse
 from pathlib import Path
+
+
+def urllib_quote(s: str) -> str:
+    return urllib.parse.quote(str(s))
 
 from pdf_parser import extract_stores_from_pdf
 from geocoder import geocode_addresses, geocode_single
@@ -367,8 +372,3 @@ st.download_button(
     file_name="優待店舗リスト.csv",
     mime="text/csv",
 )
-
-
-def urllib_quote(s):
-    import urllib.parse
-    return urllib.parse.quote(s)
