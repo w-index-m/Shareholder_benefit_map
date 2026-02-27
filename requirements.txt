@@ -1,0 +1,21 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 株主優待 近隣店舗マップ - 依存パッケージ
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Streamlit UI
+streamlit>=1.32.0
+
+# PDF テキスト抽出（テキストPDF対応）
+pdfplumber>=0.10.0
+
+# スキャンPDF OCR 対応
+pytesseract>=0.3.10
+pdf2image>=1.16.3
+Pillow>=10.0.0
+
+# 地図表示（OpenStreetMap、APIキー不要）
+folium>=0.16.0
+streamlit-folium>=0.20.0
+
+# データ処理
+pandas>=2.0.0
