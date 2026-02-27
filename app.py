@@ -372,3 +372,4 @@ st.download_button(
     file_name="優待店舗リスト.csv",
     mime="text/csv",
 )
+

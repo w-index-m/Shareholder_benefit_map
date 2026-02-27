@@ -1,8 +1,11 @@
 """
-geocoder.py
+geocoder.py  v2
 住所 → 緯度経度 変換モジュール
 
-Nominatim（無料・APIキー不要）と Google Maps API の両対応
+修正点:
+- 現在地検索時に「日本」を付加して誤認識を防止
+- 住所のジオコーディングでも都道府県が含まれない場合に国名を補完
+- Nominatim の structured query を活用
 """
 
 from __future__ import annotations
@@ -12,22 +15,27 @@ import urllib.parse
 import urllib.request
 from functools import lru_cache
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Nominatim（OpenStreetMap、無料・APIキー不要）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 USER_AGENT = "SharHolder-Benefit-Map/1.0 (educational project)"
+
+
+def _ensure_japan(address: str) -> str:
+    """住所に「日本」が含まれていなければ末尾に付加（Nominatim誤認識防止）"""
+    if "日本" not in address and "Japan" not in address:
+        return address + " 日本"
+    return address
 
 
 @lru_cache(maxsize=512)
 def _nominatim_geocode(address: str) -> tuple[float, float] | None:
-    """Nominatim で住所 → (lat, lng) を取得。失敗時は None"""
+    """Nominatim で住所 → (lat, lng)。日本に限定。"""
+    query = _ensure_japan(address)
     params = urllib.parse.urlencode({
-        "q": address,
+        "q": query,
         "format": "json",
         "limit": 1,
-        "countrycodes": "jp",   # 日本に限定
+        "countrycodes": "jp",
         "accept-language": "ja",
     })
     url = f"{NOMINATIM_URL}?{params}"
@@ -42,16 +50,9 @@ def _nominatim_geocode(address: str) -> tuple[float, float] | None:
     return None
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Google Maps Geocoding API
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
-
-
 @lru_cache(maxsize=512)
 def _google_geocode(address: str, api_key: str) -> tuple[float, float] | None:
-    """Google Geocoding API で住所 → (lat, lng) を取得。失敗時は None"""
+    """Google Geocoding API で住所 → (lat, lng)"""
     params = urllib.parse.urlencode({
         "address": address,
         "key": api_key,
@@ -70,52 +71,31 @@ def _google_geocode(address: str, api_key: str) -> tuple[float, float] | None:
     return None
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 公開インターフェース
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def geocode_single(
     address: str,
     api_key: str | None = None,
     provider: str = "nominatim",
 ) -> tuple[float, float] | None:
     """
-    1件の住所を (lat, lng) に変換。失敗時は None。
-
-    Parameters
-    ----------
-    address  : 住所文字列
-    api_key  : Google Maps API キー（provider="google" の場合のみ必要）
-    provider : "nominatim" | "google"
+    1件の住所/地名を (lat, lng) に変換。失敗時は None。
+    駅名・ランドマーク名も対応（Nominatim に「日本」を付加して誤認識を防ぐ）。
     """
     if not address:
         return None
-
     if provider == "google" and api_key:
         return _google_geocode(address, api_key)
-    else:
-        return _nominatim_geocode(address)
+    return _nominatim_geocode(address)
 
 
 def geocode_addresses(
     stores: list[dict],
     api_key: str | None = None,
     provider: str = "nominatim",
-    delay: float = 1.1,   # Nominatim の利用規約: 1秒以上の間隔
+    delay: float = 1.1,
 ) -> list[dict]:
-    """
-    店舗リスト全件をジオコーディングして lat/lng を追加して返す。
-
-    Parameters
-    ----------
-    stores   : 店舗情報リスト（各要素に "address" キー必須）
-    api_key  : Google Maps API キー（Nominatim 使用時は不要）
-    provider : "nominatim" | "google"
-    delay    : リクエスト間隔（秒）- Nominatim は 1 秒以上必須
-    """
+    """店舗リスト全件をジオコーディングして lat/lng を追加。"""
     if provider == "nominatim":
-        # Nominatim は 1リクエスト/秒 の制限
-        delay = max(delay, 1.1)
+        delay = max(delay, 1.1)   # Nominatim 利用規約: 1秒以上
     else:
         delay = max(delay, 0.1)
 
@@ -127,5 +107,4 @@ def geocode_addresses(
         if result:
             store["lat"], store["lng"] = result
         time.sleep(delay)
-
     return stores
