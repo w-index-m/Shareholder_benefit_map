@@ -1,12 +1,6 @@
 """
 pdf_parser.py
-クリエイトレストランホールディングス株主優待PDF に特化したパーサー
-
-PDF形式:
-  各行: ブランド名 店舗名 住所（市区町村+番地） ビル名等 電話番号
-  都道府県はセクション見出しとして単独行で出現
-
-OCRは不要 (テキスト埋め込みPDF)。pdfplumber で直接読み取る。
+クリエイト・レストランツ(CRH) と WDI の両方の株主優待PDFに対応したパーサー
 """
 
 from __future__ import annotations
@@ -24,123 +18,130 @@ PREFS = [
     "福岡","佐賀","長崎","熊本","大分","宮崎","鹿児島","沖縄"
 ]
 
-SECTION_RE = re.compile(
-    r'^(' + '|'.join(PREFS) + r')(?:都|道|府|県)?(?:　| )*$'
-)
-CITY_START_RE = re.compile(
-    r'(?:' + '|'.join(PREFS) + r')(?:都|道|府|県)?'
-    r'[\u4e00-\u9fff\w]{1,10}(?:市|区|郡)',
-    re.UNICODE,
-)
-PREF_ONLY_RE = re.compile('(?:' + '|'.join(PREFS) + ')(?:都|道|府|県)?')
-TEL_RE = re.compile(r'\d{2,4}-\d{2,4}-\d{4}')
-SKIP_RE = re.compile(
-    r'^(?:株主様|ご利用|店舗は|ご理解|なお|注|※|・・|ページ|\d+$|Copyright|http|年月日|利用上限|ゴルフ)',
-    re.UNICODE,
-)
+# 都道府県の見出し判定用（クリレス用）
+SECTION_RE = re.compile(r'^(' + '|'.join(PREFS) + r')(?:都|道|府|県)?(?:　| )*$')
 
+def clean_text(text: str) -> str:
+    """不要な引用符や連続する改行を整理する"""
+    # WDI形式の引用符と改行を削除
+    text = text.replace('"', '').replace('\r', '')
+    # 住所内の不自然な改行（スペース+改行など）を結合
+    text = re.sub(r'\n\s+', '', text)
+    return text
 
-def _find_address_start(text: str):
-    m = CITY_START_RE.search(text)
-    if m:
-        return m.start()
-    m = PREF_ONLY_RE.search(text)
-    if m:
-        return m.start()
-    m = re.search(r'[\u4e00-\u9fff]{1,6}(?:市|区|町|村)', text)
-    if m:
-        return m.start()
-    return None
+def parse_wdi_format(full_text: str, company: str) -> list[dict]:
+    """WDI形式（カンマ区切り風）の解析"""
+    stores = []
+    # 引用符とカンマのパターンで分割を試みる
+    # WDIのPDFは "店名","住所","営業時間","電話番号" の並びが多い
+    blocks = full_text.split('"\n"')
+    
+    for block in blocks:
+        # クリーンアップ
+        parts = [p.strip().replace('\n', '') for p in block.split('","')]
+        
+        if len(parts) >= 2:
+            name = parts[0].replace('"', '')
+            address = parts[1].replace('"', '')
+            tel = ""
+            # 電話番号を探す（0から始まる数字とハイフン）
+            for p in parts:
+                tel_match = re.search(r'\d{2,4}-\d{2,4}-\d{4}', p)
+                if tel_match:
+                    tel = tel_match.group()
+                    break
+            
+            # 住所から都道府県を特定
+            pref = ""
+            for p in PREFS:
+                if address.startswith(p):
+                    pref = p
+                    break
+            
+            if "店名" in name or not address:
+                continue
 
-
-def _parse_stores_from_text(text: str, company: str) -> list[dict]:
-    stores: list[dict] = []
-    current_pref = ""
-
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or SKIP_RE.match(line):
-            continue
-
-        sec = SECTION_RE.match(line)
-        if sec:
-            current_pref = sec.group(1)
-            continue
-
-        tel_m = TEL_RE.search(line)
-        if not tel_m:
-            continue
-
-        tel = tel_m.group(0)
-        before_tel = line[:tel_m.start()].strip()
-
-        addr_start = _find_address_start(before_tel)
-        if addr_start is None:
-            continue
-
-        store_name = before_tel[:addr_start].strip()
-        address    = before_tel[addr_start:].strip()
-
-        if not store_name or len(store_name) < 1:
-            continue
-        if not address or len(address) < 4:
-            continue
-
-        stores.append({
-            "name":    store_name,
-            "address": address,
-            "tel":     tel,
-            "pref":    current_pref,
-            "company": company,
-        })
-
+            stores.append({
+                "name": name,
+                "address": address,
+                "tel": tel,
+                "pref": pref,
+                "company": company
+            })
     return stores
 
+def parse_create_res_format(full_text: str, company: str) -> list[dict]:
+    """クリエイト・レストランツ形式（行ベース）の解析"""
+    stores = []
+    current_pref = ""
+    
+    for line in full_text.split('\n'):
+        line = line.strip()
+        if not line: continue
+        
+        # 都道府県見出しの更新
+        m = SECTION_RE.match(line)
+        if m:
+            current_pref = m.group(1)
+            continue
+        
+        # 住所と電話番号の抽出
+        tel_match = re.search(r'\d{2,4}-\d{2,4}-\d{4}', line)
+        if not tel_match: continue
+        
+        tel = tel_match.group()
+        # 電話番号より前を店名・住所として扱う
+        pre_tel = line[:tel_match.start()].strip()
+        
+        # 住所の開始位置（都道府県名）を探す
+        addr_start = -1
+        for p in PREFS:
+            idx = pre_tel.find(p)
+            if idx != -1:
+                addr_start = idx
+                if not current_pref: current_pref = p
+                break
+        
+        if addr_start != -1:
+            store_name = pre_tel[:addr_start].strip()
+            address = pre_tel[addr_start:].strip()
+            
+            stores.append({
+                "name": store_name,
+                "address": address,
+                "tel": tel,
+                "pref": current_pref,
+                "company": company
+            })
+            
+    return stores
 
-def _read_bytes(source, source_type: str) -> bytes:
+def extract_stores_from_pdf(source, source_type: str = "upload") -> list[dict]:
+    import pdfplumber
+    
+    # 会社名の取得
+    raw_name = source.name if hasattr(source, "name") else Path(source).stem
+    company = re.sub(r"\d+|株主優待|優待|案内|PDF|\.pdf|_|\s", "", raw_name).strip() or raw_name
+
+    # PDF読み込み
     if source_type == "upload":
         data = source.read()
         source.seek(0)
-        return data
-    return Path(source).read_bytes()
-
-
-def extract_stores_from_pdf(
-    source,
-    source_type: str = "upload",
-    ocr_lang: str = "jpn+eng",
-) -> list[dict]:
-    import pdfplumber
-
-    raw_name = source.name if hasattr(source, "name") else Path(source).stem
-    company = re.sub(
-        r"\d{4}|\d+年度?|株主優待|優待|案内|ご利用|PDF|\.pdf|_|\s",
-        "", raw_name
-    ).strip() or raw_name
-
-    data = _read_bytes(source, source_type)
+    else:
+        data = Path(source).read_bytes()
 
     text_pages = []
-    try:
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                text_pages.append(t)
-    except Exception as e:
-        raise RuntimeError(f"PDF読み取りエラー: {e}")
-
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for page in pdf.pages:
+            text_pages.append(page.extract_text() or "")
+    
     full_text = "\n".join(text_pages)
-    if not full_text.strip():
-        raise ValueError("PDFからテキストを抽出できませんでした")
 
-    stores = _parse_stores_from_text(full_text, company)
-
-    seen: set[tuple] = set()
-    unique = []
-    for s in stores:
-        key = (s["name"], s["address"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(s)
-
-    return unique
+    # 形式判定と実行
+    if '"' in full_text and '","' in full_text:
+        # WDI形式と判断
+        return parse_wdi_format(full_text, company)
+    else:
+        # クレス（標準行）形式と判断
+        return parse_create_res_format(full_text, company)
+      
