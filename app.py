@@ -184,19 +184,70 @@ else:
 st.success(f"✅ 合計 **{len(filtered_stores)}** 件の店舗情報を取得")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ジオコーディング（住所 → 緯度経度）
+# ジオコーディング（住所 → 緯度経度）並列処理
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 use_google = gmaps_key is not None and len(gmaps_key) > 10
+provider   = "google" if use_google else "nominatim"
+workers    = 10 if use_google else 3
 
-with st.spinner("📍 店舗の住所を地図座標に変換中（初回は時間がかかります）..."):
-    filtered_stores = geocode_addresses(
-        filtered_stores,
-        api_key=gmaps_key if use_google else None,
-        provider="google" if use_google else "nominatim",
-    )
+# ユニーク住所数（実際のAPI呼び出し回数）
+unique_addr_count = len(set(
+    s.get("address","") for s in filtered_stores if s.get("address")
+))
 
+st.markdown(
+    f"📍 **座標変換中** — {unique_addr_count} 件のユニーク住所を "
+    f"{'Google API' if use_google else 'Nominatim'}（**{workers}並列**）で処理します"
+)
+
+geo_progress  = st.progress(0)
+geo_status    = st.empty()
+
+# キャッシュ済み件数を事前カウントして表示
+from pathlib import Path as _Path
+import sqlite3 as _sqlite3, hashlib as _hashlib
+_cache_exists = _Path("geocode_cache.db").exists()
+if _cache_exists:
+    try:
+        _conn = _sqlite3.connect("geocode_cache.db")
+        _cached_keys = {
+            row[0] for row in _conn.execute("SELECT key FROM geocache").fetchall()
+        }
+        _conn.close()
+        _pre_hits = sum(
+            1 for s in filtered_stores
+            if _hashlib.md5(f"{provider}:{s.get('address','')}".encode()).hexdigest()
+               in _cached_keys
+        )
+        if _pre_hits > 0:
+            geo_status.info(f"⚡ {_pre_hits} 件はキャッシュから即時取得、残り {unique_addr_count - _pre_hits} 件をAPIで取得します")
+    except Exception:
+        pass
+
+def _update_progress(done: int, total: int):
+    pct = done / total if total > 0 else 1.0
+    geo_progress.progress(min(pct, 1.0))
+    elapsed_est = ""
+    if provider == "nominatim" and done > 0:
+        remaining = total - done
+        # 3並列×0.4秒 → 実効速度 約7.5件/秒
+        est_sec = remaining / 7.5
+        if est_sec > 60:
+            elapsed_est = f"（残り約 {est_sec/60:.0f} 分）"
+        else:
+            elapsed_est = f"（残り約 {est_sec:.0f} 秒）"
+    geo_status.markdown(f"🔄 {done} / {total} 件完了 {elapsed_est}")
+
+filtered_stores = geocode_addresses(
+    filtered_stores,
+    api_key=gmaps_key if use_google else None,
+    provider=provider,
+    progress_callback=_update_progress,
+)
+
+geo_progress.progress(1.0)
 geocoded = [s for s in filtered_stores if s.get("lat") and s.get("lng")]
-st.info(f"📍 座標取得: {len(geocoded)}/{len(filtered_stores)} 件成功")
+geo_status.success(f"✅ 座標取得完了: {len(geocoded)}/{len(filtered_stores)} 件成功")
 
 if not geocoded:
     st.error("住所から座標を取得できませんでした。住所の書式を確認してください。")
