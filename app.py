@@ -1,404 +1,236 @@
 """
-株主優待 近隣店舗マップ
-- 複数社PDF 対応
-- Google Maps APIキー不要（OpenStreetMap + Folium）
-- スキャンPDF OCR 対応（pytesseract）
-- 現在地から近い順に表示
+株主優待 店舗検索アプリ v9
+- Nominatim/座標変換 完全削除
+- キーワード（駅名・市区町村）で住所文字列を検索
+- 各店舗にGoogleマップリンク（住所渡し、APIキー不要）
+- 絞り込み結果をまとめてGoogleマップ検索するボタン
+- CSVダウンロード（Googleマイマップにインポート可能）
 """
-
 import streamlit as st
 import pandas as pd
-import math
 import urllib.parse
 from pathlib import Path
-
-
-def urllib_quote(s: str) -> str:
-    return urllib.parse.quote(str(s))
-
 from pdf_parser import extract_stores_from_pdf
-from geocoder import geocode_addresses, geocode_single
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ページ設定
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.set_page_config(
-    page_title="株主優待 近隣店舗マップ",
+    page_title="株主優待 店舗検索",
     page_icon="🎫",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# カスタムCSS
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap');
+html, body, [class*="css"] { font-family: 'Noto Sans JP', sans-serif; }
 .store-card {
-    background: #f8f9fa;
-    border-left: 4px solid #e74c3c;
-    padding: 10px 14px;
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-left: 5px solid #1a73e8;
+    border-radius: 6px;
+    padding: 12px 16px;
     margin: 6px 0;
-    border-radius: 4px;
 }
-.distance-badge {
-    background: #e74c3c;
-    color: white;
-    padding: 2px 8px;
-    border-radius: 12px;
-    font-size: 0.8em;
-    font-weight: bold;
-}
+.store-brand { font-size: 0.8em; color: #666; }
+.store-name  { font-size: 1.05em; font-weight: 700; color: #202124; }
+.store-addr  { font-size: 0.85em; color: #444; margin-top: 2px; }
+.store-tel   { font-size: 0.82em; color: #888; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🎫 株主優待 近隣店舗マップ")
-st.caption("PDFをアップロードして、現在地から近い優待店舗を地図で確認できます（無料・APIキー不要）")
+st.title("🎫 株主優待 店舗検索")
+st.caption("PDFを読み込んで、駅名・エリアで優待店舗を絞り込めます（完全無料・APIキー不要）")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # サイドバー
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with st.sidebar:
-    st.header("📍 現在地を設定")
-    current_address = st.text_input(
-        "住所 / 駅名 / ランドマーク",
-        placeholder="例: 東京駅、渋谷区渋谷2-1-1、梅田駅",
-        help="都市名・駅名でも検索できます"
-    )
-
-    st.divider()
-    st.header("🔍 絞り込み")
-    max_distance_km = st.slider("最大距離 (km)", 1, 200, 50)
-    max_results = st.slider("最大表示件数", 5, 200, 50)
-
-    st.divider()
-    st.header("⚙️ 詳細設定")
-    ocr_lang = st.selectbox(
-        "OCR 言語",
-        ["jpn+eng", "jpn", "eng"],
-        index=0,
-        help="スキャンPDFのOCR言語設定"
-    )
-    gmaps_key = None  # Nominatim固定（APIキー不要）
-    st.success("🗺️ 地図・座標変換ともに完全無料\nOpenStreetMap / Nominatim 使用")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PDF アップロード + pdfs/ フォルダ自動検出
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("📄 株主優待PDF をアップロード")
-
-col_up, col_hint = st.columns([3, 2])
-with col_up:
-    uploaded_files = st.file_uploader(
-        "PDFを選択（複数社・複数ファイル可）",
+    st.header("📂 PDFを読み込む")
+    uploaded = st.file_uploader(
+        "株主優待PDF",
         type=["pdf"],
         accept_multiple_files=True,
-        label_visibility="collapsed",
-    )
-with col_hint:
-    st.info(
-        "**複数社対応:** 複数のPDFを同時にアップロードできます。\n\n"
-        "または `pdfs/` フォルダに入れておくと自動読み込みされます。"
     )
 
-# pdfs/ フォルダ内の既存PDF
-pdf_folder = Path("pdfs")
-existing_pdfs = sorted(pdf_folder.glob("*.pdf")) if pdf_folder.exists() else []
+    # pdfs/ フォルダも自動読み込み
+    pdf_dir = Path("pdfs")
+    preloaded = sorted(pdf_dir.glob("*.pdf")) if pdf_dir.exists() else []
+    if preloaded:
+        st.caption(f"📁 pdfs/ フォルダから {len(preloaded)} 件自動読み込み")
 
-# 全PDF ソース統合
-sources: list[tuple[str, any, str]] = []  # (type, source, label)
-for f in (uploaded_files or []):
-    sources.append(("upload", f, f.name))
-for p in existing_pdfs:
-    sources.append(("file", p, p.name))
+    st.divider()
+    st.header("🔍 エリア絞り込み")
+    keyword = st.text_input(
+        "駅名・市区町村・キーワード",
+        placeholder="例：横浜、新宿、川崎市、渋谷",
+        help="住所・店舗名を部分一致で検索します"
+    )
+
+    st.divider()
+    st.header("🗂️ 都道府県フィルター")
+    selected_prefs = []  # 後で動的生成
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PDF 解析
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+all_stores = []
+
+sources = list(uploaded or [])
+
+# preloaded ファイルを File-like に変換
+class _FileProxy:
+    def __init__(self, p: Path):
+        self.name = p.name
+        self._data = p.read_bytes()
+        self._pos = 0
+    def read(self, n=-1):
+        d = self._data[self._pos:]
+        self._pos = len(self._data)
+        return d
+    def seek(self, p): self._pos = p
+
+for p in preloaded:
+    sources.append(_FileProxy(p))
 
 if not sources:
-    st.markdown("---")
-    st.markdown("""
-    ### 📋 使い方
-    1. 上の「PDFを選択」から株主優待PDFをアップロード
-    2. 左のサイドバーで現在地（住所・駅名）を入力
-    3. 地図に近い店舗が表示されます
-    
-    **対応PDF形式:**
-    - 📝 テキストPDF（そのまま読み取り）
-    - 🖼️ スキャン画像PDF（OCRで自動認識）
-    """)
+    st.info("👆 サイドバーからPDFをアップロードしてください")
     st.stop()
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PDF 解析
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-all_stores: list[dict] = []
-company_labels: list[str] = []
-
-progress_bar = st.progress(0, text="PDF を解析中...")
-errors = []
-
-for idx, (src_type, source, label) in enumerate(sources):
-    progress_bar.progress((idx) / len(sources), text=f"📖 解析中: {label}")
+for src in sources:
     try:
-        stores = extract_stores_from_pdf(source, src_type, ocr_lang=ocr_lang)
-        for s in stores:
-            s.setdefault("source_file", label)
+        stores = extract_stores_from_pdf(src, source_type="upload")
         all_stores.extend(stores)
-        if stores:
-            company_labels.append(f"✅ {label}（{len(stores)} 件）")
-        else:
-            company_labels.append(f"⚠️ {label}（店舗情報なし）")
     except Exception as e:
-        errors.append(f"❌ {label}: {e}")
-        company_labels.append(f"❌ {label}（エラー）")
-
-progress_bar.progress(1.0, text="解析完了")
-
-# 結果サマリー
-with st.expander("📊 PDF 解析結果", expanded=bool(errors)):
-    for lbl in company_labels:
-        st.markdown(f"- {lbl}")
-    for err in errors:
-        st.error(err)
+        st.error(f"❌ {src.name}: {e}")
 
 if not all_stores:
-    st.error("店舗情報を抽出できませんでした。PDFの内容・形式を確認してください。")
+    st.error("店舗情報を抽出できませんでした")
     st.stop()
 
-# 会社フィルター
-all_companies = sorted(set(s.get("company", "不明") for s in all_stores))
-if len(all_companies) > 1:
-    selected_companies = st.multiselect(
-        "🏢 表示する会社を選択",
-        options=all_companies,
-        default=all_companies,
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 都道府県フィルター（サイドバー動的生成）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+all_prefs = sorted(set(s.get("pref", "") for s in all_stores if s.get("pref")))
+
+with st.sidebar:
+    selected_prefs = st.multiselect(
+        "都道府県",
+        options=all_prefs,
+        default=all_prefs,
+        help="表示する都道府県を選択"
     )
-    filtered_stores = [s for s in all_stores if s.get("company") in selected_companies]
-else:
-    filtered_stores = all_stores
 
-st.success(f"✅ 合計 **{len(filtered_stores)}** 件の店舗情報を取得")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 絞り込み
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+filtered = all_stores
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ジオコーディング（住所 → 緯度経度）並列処理
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-use_google = gmaps_key is not None and len(gmaps_key) > 10
-provider   = "google" if use_google else "nominatim"
-workers    = 10 if use_google else 3
+# 都道府県フィルター
+if selected_prefs:
+    filtered = [s for s in filtered if s.get("pref") in selected_prefs]
 
-# session_state からキャッシュを復元
-from geocoder import load_session_cache, save_session_cache
-if "geocache" not in st.session_state:
-    st.session_state.geocache = {}
-load_session_cache(st.session_state)
+# キーワード検索（住所・店舗名を部分一致）
+if keyword.strip():
+    kw = keyword.strip()
+    filtered = [
+        s for s in filtered
+        if kw in s.get("address", "") or kw in s.get("name", "")
+    ]
 
-# ユニーク住所数
-unique_addr_count = len(set(
-    s.get("address", "") for s in filtered_stores if s.get("address")
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 結果ヘッダー
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+col_stat, col_btn = st.columns([3, 2])
+with col_stat:
+    total_msg = f"全 **{len(all_stores)}** 件中 **{len(filtered)}** 件を表示"
+    if keyword.strip():
+        total_msg += f"（キーワード: 「{keyword}」）"
+    st.markdown(total_msg)
+
+with col_btn:
+    if filtered:
+        # まとめてGoogleマップで検索（最初の1件の住所で検索し、周辺を確認）
+        if keyword.strip():
+            gmaps_area_url = (
+                "https://www.google.com/maps/search/"
+                + urllib.parse.quote(keyword.strip() + " 周辺")
+            )
+        else:
+            gmaps_area_url = "https://www.google.com/maps"
+        st.link_button(
+            f"🗺️ 「{keyword or 'エリア'}」をGoogleマップで開く",
+            gmaps_area_url,
+            use_container_width=True,
+        )
+
+if not filtered:
+    st.warning("条件に一致する店舗が見つかりませんでした")
+    st.stop()
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CSVダウンロード（Googleマイマップインポート用）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+df = pd.DataFrame([{
+    "店舗名":     s.get("name", ""),
+    "住所":       s.get("address", ""),
+    "電話番号":   s.get("tel", ""),
+    "都道府県":   s.get("pref", ""),
+    "GoogleMap":  "https://www.google.com/maps/search/?api=1&query="
+                  + urllib.parse.quote(s.get("address", "")),
+} for s in filtered])
+
+col_dl1, col_dl2 = st.columns(2)
+with col_dl1:
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "⬇️ CSVダウンロード（Googleマイマップ用）",
+        data=csv_bytes,
+        file_name=f"優待店舗_{keyword or '全件'}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        help="Googleマイマップ → インポート → このCSVを選ぶと地図にピンが立ちます",
+    )
+with col_dl2:
+    st.caption("💡 Googleマイマップにこの CSV をインポートすると全店舗が地図上にピン表示されます")
+
+st.divider()
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 店舗リスト表示
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 都道府県ごとにグループ表示
+from itertools import groupby
+
+pref_order = {p: i for i, p in enumerate(all_prefs)}
+filtered_sorted = sorted(filtered, key=lambda s: (
+    pref_order.get(s.get("pref", ""), 999),
+    s.get("address", "")
 ))
 
-# キャッシュ済み件数
-_pre_hits = sum(
-    1 for s in filtered_stores
-    if f"{provider}:{s.get('address','')}" in st.session_state.geocache
-)
-_need_api = unique_addr_count - _pre_hits
+current_pref = None
+for s in filtered_sorted:
+    pref = s.get("pref", "")
+    if pref != current_pref:
+        current_pref = pref
+        st.subheader(f"📍 {pref}")
 
-if _need_api > 0:
-    est_sec = _need_api / (10 if use_google else 7.5)
-    if est_sec > 60:
-        eta_str = f"約 {est_sec/60:.0f} 分"
-    else:
-        eta_str = f"約 {int(est_sec)} 秒"
-    spin_msg = (
-        f"📍 座標変換中… {_need_api} 件を {workers}並列で処理します（推定 {eta_str}）"
-    )
-else:
-    spin_msg = "📍 キャッシュから座標を取得中…"
-
-with st.spinner(spin_msg):
-    try:
-        filtered_stores = geocode_addresses(
-            filtered_stores,
-            api_key=gmaps_key if use_google else None,
-            provider=provider,
-        )
-        save_session_cache(st.session_state)
-    except Exception as _geo_err:
-        st.error(f"ジオコーディングエラー: {type(_geo_err).__name__}: {_geo_err}")
-        st.stop()
-
-geocoded = [s for s in filtered_stores if s.get("lat") and s.get("lng")]
-st.success(f"✅ 座標取得完了: {len(geocoded)}/{len(filtered_stores)} 件成功")
-
-if not geocoded:
-    st.error("住所から座標を取得できませんでした。住所の書式を確認してください。")
-    st.stop()
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 現在地の取得
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-origin_lat, origin_lng = None, None
-
-if current_address:
-    with st.spinner(f"🔍 「{current_address}」の座標を検索中..."):
-        result = geocode_single(
-            current_address,
-            api_key=gmaps_key if use_google else None,
-            provider="google" if use_google else "nominatim",
-        )
-    if result:
-        origin_lat, origin_lng = result
-        st.success(f"✅ 現在地: {current_address}")
-    else:
-        st.warning("現在地の座標を取得できませんでした。もう少し詳しい住所を試してください。")
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 距離計算・ソート
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def haversine(lat1, lng1, lat2, lng2):
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2))
-         * math.sin(dlng / 2) ** 2)
-    return R * 2 * math.asin(math.sqrt(a))
-
-
-display_stores = geocoded
-if origin_lat and origin_lng:
-    for s in display_stores:
-        s["distance_km"] = haversine(origin_lat, origin_lng, s["lat"], s["lng"])
-    display_stores.sort(key=lambda x: x.get("distance_km", 9999))
-    display_stores = [s for s in display_stores if s.get("distance_km", 9999) <= max_distance_km]
-
-display_stores = display_stores[:max_results]
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 地図表示（Folium × OpenStreetMap → APIキー不要）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader("🗺️ 近隣店舗マップ")
-
-try:
-    import folium
-    from streamlit_folium import st_folium
-
-    center_lat = origin_lat or display_stores[0]["lat"]
-    center_lng = origin_lng or display_stores[0]["lng"]
-
-    # ズームレベル自動計算
-    if origin_lat and display_stores:
-        dists = [s.get("distance_km", 10) for s in display_stores]
-        max_d = max(dists) if dists else 10
-        zoom = 13 if max_d < 5 else 11 if max_d < 20 else 9 if max_d < 50 else 7
-    else:
-        zoom = 11
-
-    m = folium.Map(
-        location=[center_lat, center_lng],
-        zoom_start=zoom,
-        tiles="OpenStreetMap",
+    name    = s.get("name", "")
+    address = s.get("address", "")
+    tel     = s.get("tel", "")
+    gmaps_url = (
+        "https://www.google.com/maps/search/?api=1&query="
+        + urllib.parse.quote(address)
     )
 
-    # 現在地マーカー
-    if origin_lat and origin_lng:
-        folium.Marker(
-            [origin_lat, origin_lng],
-            popup=folium.Popup(f"<b>📍 現在地</b><br>{current_address}", max_width=200),
-            tooltip="📍 現在地",
-            icon=folium.Icon(color="blue", icon="home", prefix="fa"),
-        ).add_to(m)
-
-    # 会社ごとに色分け
-    company_colors = {}
-    color_list = ["red", "green", "orange", "purple", "darkblue", "darkred",
-                  "cadetblue", "darkgreen", "pink", "gray"]
-    for i, c in enumerate(all_companies):
-        company_colors[c] = color_list[i % len(color_list)]
-
-    # 店舗マーカー
-    for i, s in enumerate(display_stores, 1):
-        company = s.get("company", "")
-        color = company_colors.get(company, "red")
-        dist_text = f"<br>📏 現在地から {s['distance_km']:.1f} km" if "distance_km" in s else ""
-        gmaps_url = f"https://www.google.com/maps/search/?api=1&query={s['lat']},{s['lng']}"
-
-        popup_html = f"""
-        <div style='min-width:200px'>
-        <b style='font-size:1.1em'>{s.get('name', '不明')}</b><br>
-        🏢 {company}<br>
-        📮 {s.get('address', '不明')}{dist_text}<br><br>
-        <a href='{gmaps_url}' target='_blank'
-           style='background:#4285F4;color:white;padding:4px 8px;
-                  border-radius:4px;text-decoration:none;font-size:0.85em'>
-           🗺️ Google Maps で開く
-        </a>
-        </div>
-        """
-        folium.Marker(
-            [s["lat"], s["lng"]],
-            popup=folium.Popup(popup_html, max_width=280),
-            tooltip=f"{i}. {s.get('name', '不明')} ({company})",
-            icon=folium.Icon(color=color, icon="cutlery", prefix="fa"),
-        ).add_to(m)
-
-    # 凡例
-    if len(all_companies) > 1:
-        legend_html = "<div style='background:white;padding:8px;border-radius:4px;border:1px solid #ccc'>"
-        for comp, col in company_colors.items():
-            icon_colors = {
-                "red": "#e74c3c", "green": "#27ae60", "orange": "#e67e22",
-                "purple": "#8e44ad", "darkblue": "#2c3e50", "darkred": "#c0392b",
-                "cadetblue": "#5dade2", "darkgreen": "#1e8449", "pink": "#f1948a",
-                "gray": "#95a5a6"
-            }
-            hex_col = icon_colors.get(col, "#e74c3c")
-            legend_html += f"<span style='color:{hex_col}'>●</span> {comp}<br>"
-        legend_html += "</div>"
-        m.get_root().html.add_child(folium.Element(
-            f"<div style='position:fixed;top:10px;right:10px;z-index:9999'>{legend_html}</div>"
-        ))
-
-    st_folium(m, use_container_width=True, height=520, returned_objects=[])
-
-except ImportError:
-    st.warning(
-        "地図表示には `folium` と `streamlit-folium` が必要です。\n"
-        "`pip install folium streamlit-folium` を実行してください。"
-    )
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 店舗リスト
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-st.subheader(f"📋 店舗一覧（{len(display_stores)} 件）")
-
-rows = []
-for i, s in enumerate(display_stores, 1):
-    dist = f"{s['distance_km']:.1f} km" if "distance_km" in s else "-"
-    gmaps_url = f"https://www.google.com/maps/search/?api=1&query={urllib_quote(s.get('address', ''))}"
-    rows.append({
-        "#": i,
-        "店舗名": s.get("name", "不明"),
-        "会社": s.get("company", ""),
-        "住所": s.get("address", "不明"),
-        "現在地からの距離": dist,
-        "Google Maps": f"https://www.google.com/maps/search/?api=1&query={s['lat']},{s['lng']}",
-    })
-
-df = pd.DataFrame(rows)
-
-st.dataframe(
-    df,
-    column_config={
-        "Google Maps": st.column_config.LinkColumn("🗺️ 地図", display_text="開く"),
-    },
-    use_container_width=True,
-    hide_index=True,
-)
-
-# CSV ダウンロード
-csv_df = df.drop(columns=["Google Maps"])
-st.download_button(
-    label="⬇️ CSV でダウンロード",
-    data=csv_df.to_csv(index=False, encoding="utf-8-sig"),
-    file_name="優待店舗リスト.csv",
-    mime="text/csv",
-)
-
+    with st.container():
+        c1, c2 = st.columns([5, 1])
+        with c1:
+            st.markdown(
+                f"""<div class="store-card">
+                  <div class="store-name">{name}</div>
+                  <div class="store-addr">📮 {address}</div>
+                  <div class="store-tel">📞 {tel}</div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.link_button("🗺️ 地図", gmaps_url, use_container_width=True)
