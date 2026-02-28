@@ -77,16 +77,8 @@ with st.sidebar:
         index=0,
         help="スキャンPDFのOCR言語設定"
     )
-    geocode_provider = st.selectbox(
-        "住所変換（ジオコーダー）",
-        ["Nominatim（無料・日本語OK）", "Google Maps API（高精度）"],
-        index=0,
-    )
-    if "Google Maps" in geocode_provider:
-        gmaps_key = st.text_input("Google Maps API キー", type="password")
-    else:
-        gmaps_key = None
-        st.info("💡 Nominatimは無料で使えます（精度はGoogle比でやや劣ります）")
+    gmaps_key = None  # Nominatim固定（APIキー不要）
+    st.success("🗺️ 地図・座標変換ともに完全無料\nOpenStreetMap / Nominatim 使用")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PDF アップロード + pdfs/ フォルダ自動検出
